@@ -1844,16 +1844,29 @@
     }
 
     document.addEventListener('dragover', (event) => {
-      event.preventDefault();
-      event.dataTransfer.dropEffect = 'copy';
+      const transfer = event.dataTransfer;
+      if (typeof state.draggedPageIndex === 'number') {
+        event.preventDefault();
+        if (transfer) {
+          transfer.dropEffect = 'move';
+        }
+        return;
+      }
+      if (transfer && Array.from(transfer.types || []).includes('Files')) {
+        event.preventDefault();
+        transfer.dropEffect = 'copy';
+      }
     });
 
     document.addEventListener('drop', async (event) => {
-      event.preventDefault();
+      if (typeof state.draggedPageIndex === 'number') {
+        return;
+      }
       const transfer = event.dataTransfer;
       if (!transfer || !transfer.files || transfer.files.length === 0) {
         return;
       }
+      event.preventDefault();
       const file = transfer.files[0];
       await openPdfFile(file);
     });
