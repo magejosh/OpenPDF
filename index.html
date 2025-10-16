@@ -39,6 +39,7 @@
       border-bottom: 1px solid var(--border);
       display: flex;
       align-items: center;
+      flex-wrap: wrap;
       gap: 0.75rem;
       z-index: 5;
     }
@@ -88,6 +89,14 @@
       overflow: hidden;
     }
 
+    body.comments-collapsed main {
+      grid-template-columns: 250px 1fr;
+    }
+
+    body.comments-collapsed #comment-panel {
+      display: none;
+    }
+
     .panel {
       background: var(--panel);
       border: 1px solid var(--border);
@@ -116,6 +125,7 @@
       display: flex;
       align-items: center;
       justify-content: center;
+      min-height: 200px;
       transition: border-color 0.15s, box-shadow 0.15s;
     }
 
@@ -273,6 +283,10 @@
       height: 100%;
     }
 
+    #toggle-comments-btn {
+      margin-left: auto;
+    }
+
     #comment-panel h2 {
       margin: 0;
       padding: 0.9rem;
@@ -405,6 +419,13 @@
       #comment-panel {
         grid-area: comments;
       }
+
+      body.comments-collapsed main {
+        grid-template-columns: 200px 1fr;
+        grid-template-areas:
+          "thumbnails viewer"
+          "thumbnails viewer";
+      }
     }
 
     @media (max-width: 900px) {
@@ -415,6 +436,11 @@
 
       #viewer-panel {
         order: -1;
+      }
+
+      body.comments-collapsed main {
+        grid-template-columns: 1fr;
+        grid-template-rows: auto auto;
       }
     }
   </style>
@@ -430,6 +456,7 @@
     <button id="download-btn" disabled>Export PDF</button>
     <button id="add-page-btn" disabled>Add Blank Page</button>
     <button id="duplicate-page-btn" disabled>Duplicate Page</button>
+    <button id="toggle-comments-btn" aria-expanded="true" aria-controls="comment-panel">Hide Comments</button>
   </header>
   <main>
     <section class="panel" id="thumbnails-panel">
@@ -483,6 +510,7 @@
       dragInfo: null,
       pendingImagePosition: null,
       commentCounter: 1,
+      commentsCollapsed: false,
     };
 
     const elements = {
@@ -491,6 +519,7 @@
       downloadBtn: document.getElementById('download-btn'),
       addPageBtn: document.getElementById('add-page-btn'),
       duplicatePageBtn: document.getElementById('duplicate-page-btn'),
+      toggleCommentsBtn: document.getElementById('toggle-comments-btn'),
       thumbnails: document.getElementById('thumbnails'),
       pageContainer: document.getElementById('page-container'),
       toolbar: document.getElementById('toolbar'),
@@ -504,13 +533,20 @@
       emptyState: document.getElementById('empty-state'),
     };
 
-    const THUMBNAIL_MAX_WIDTH = 220;
-    const THUMBNAIL_MAX_HEIGHT = 320;
+    const THUMBNAIL_MAX_WIDTH = 260;
+    const THUMBNAIL_MAX_HEIGHT = 420;
+
+    function getCanvasPixelRatio() {
+      const ratio = window.devicePixelRatio || 1;
+      return Math.min(3, Math.max(1, ratio));
+    }
 
     const createId = (() => {
       let counter = 0;
       return (prefix) => `${prefix}-${++counter}`;
     })();
+
+    setCommentsCollapsed(state.commentsCollapsed);
 
     elements.thumbnails.addEventListener('dragover', (event) => {
       event.preventDefault();
@@ -533,6 +569,15 @@
       elements.toast.textContent = message;
       elements.toast.classList.add('show');
       setTimeout(() => elements.toast.classList.remove('show'), 2200);
+    }
+
+    function setCommentsCollapsed(collapsed) {
+      state.commentsCollapsed = collapsed;
+      document.body.classList.toggle('comments-collapsed', collapsed);
+      if (elements.toggleCommentsBtn) {
+        elements.toggleCommentsBtn.textContent = collapsed ? 'Show Comments' : 'Hide Comments';
+        elements.toggleCommentsBtn.setAttribute('aria-expanded', String(!collapsed));
+      }
     }
 
     function loadScript(src) {
@@ -605,15 +650,19 @@
       });
     }
 
-    function createPageContainer(width, height) {
+    function createPageContainer(width, height, pixelRatio = getCanvasPixelRatio()) {
       const wrapper = document.createElement('div');
       wrapper.className = 'page';
       wrapper.style.width = `${width}px`;
       wrapper.style.height = `${height}px`;
 
       const baseCanvas = document.createElement('canvas');
-      baseCanvas.width = width;
-      baseCanvas.height = height;
+      const actualWidth = Math.round(width * pixelRatio);
+      const actualHeight = Math.round(height * pixelRatio);
+      baseCanvas.width = actualWidth;
+      baseCanvas.height = actualHeight;
+      baseCanvas.style.width = `${width}px`;
+      baseCanvas.style.height = `${height}px`;
       wrapper.appendChild(baseCanvas);
 
       const overlay = document.createElement('div');
@@ -623,9 +672,16 @@
 
       const drawingLayer = document.createElement('canvas');
       drawingLayer.className = 'drawing-layer';
-      drawingLayer.width = width;
-      drawingLayer.height = height;
+      drawingLayer.width = actualWidth;
+      drawingLayer.height = actualHeight;
+      drawingLayer.style.width = `${width}px`;
+      drawingLayer.style.height = `${height}px`;
       overlay.appendChild(drawingLayer);
+
+      const drawingContext = drawingLayer.getContext('2d');
+      if (pixelRatio !== 1) {
+        drawingContext.scale(pixelRatio, pixelRatio);
+      }
 
       const annotationLayer = document.createElement('div');
       annotationLayer.className = 'annotation-layer';
@@ -633,7 +689,7 @@
 
       wrapper.appendChild(overlay);
 
-      return { wrapper, baseCanvas, overlay, drawingLayer, annotationLayer };
+      return { wrapper, baseCanvas, overlay, drawingLayer, drawingContext, annotationLayer, pixelRatio };
     }
 
     function setupPageEvents(page, index) {
@@ -677,8 +733,8 @@
       thumbnail.appendChild(indicator);
 
       const thumbCanvas = document.createElement('canvas');
-      const pageWidth = page.baseCanvas.width;
-      const pageHeight = page.baseCanvas.height;
+      const pageWidth = page.displayWidth || page.baseCanvas.width;
+      const pageHeight = page.displayHeight || page.baseCanvas.height;
       const widthScale = THUMBNAIL_MAX_WIDTH / pageWidth;
       const heightScale = THUMBNAIL_MAX_HEIGHT / pageHeight;
       const scale = Math.min(widthScale, heightScale, 1);
@@ -778,9 +834,11 @@
 
     function updateThumbnailCanvas(canvas, page) {
       const context = canvas.getContext('2d');
-      const scale = Math.min(canvas.width / page.baseCanvas.width, canvas.height / page.baseCanvas.height);
-      const width = page.baseCanvas.width * scale;
-      const height = page.baseCanvas.height * scale;
+      const pageWidth = page.displayWidth || page.baseCanvas.width;
+      const pageHeight = page.displayHeight || page.baseCanvas.height;
+      const scale = Math.min(canvas.width / pageWidth, canvas.height / pageHeight);
+      const width = pageWidth * scale;
+      const height = pageHeight * scale;
       context.clearRect(0, 0, canvas.width, canvas.height);
       const offsetX = (canvas.width - width) / 2;
       const offsetY = (canvas.height - height) / 2;
@@ -880,12 +938,18 @@
 
       clearDocument();
 
+      const pixelRatio = getCanvasPixelRatio();
+
       for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber++) {
         const pdfPage = await pdf.getPage(pageNumber);
         const viewport = pdfPage.getViewport({ scale: 1.5 });
-        const { wrapper, baseCanvas, overlay, drawingLayer, annotationLayer } = createPageContainer(viewport.width, viewport.height);
+        const { wrapper, baseCanvas, overlay, drawingLayer, drawingContext, annotationLayer, pixelRatio: appliedRatio } = createPageContainer(viewport.width, viewport.height, pixelRatio);
         const context = baseCanvas.getContext('2d');
-        await pdfPage.render({ canvasContext: context, viewport }).promise;
+        const renderContext = { canvasContext: context, viewport };
+        if (appliedRatio !== 1) {
+          renderContext.transform = [appliedRatio, 0, 0, appliedRatio, 0, 0];
+        }
+        await pdfPage.render(renderContext).promise;
 
         const annotations = {
           drawings: [],
@@ -901,9 +965,12 @@
           baseCanvas,
           overlay,
           drawingLayer,
-          drawingContext: drawingLayer.getContext('2d'),
+          drawingContext,
           annotationLayer,
           annotations,
+          pixelRatio: appliedRatio,
+          displayWidth: viewport.width,
+          displayHeight: viewport.height,
         };
 
         elements.pageContainer.appendChild(wrapper);
@@ -969,16 +1036,27 @@
     function drawPreviewRectangle(page, x, y, width, height) {
       if (!page.previewLayer) {
         const previewCanvas = document.createElement('canvas');
-        previewCanvas.width = page.baseCanvas.width;
-        previewCanvas.height = page.baseCanvas.height;
+        const displayWidth = page.displayWidth || page.baseCanvas.width;
+        const displayHeight = page.displayHeight || page.baseCanvas.height;
+        const ratio = page.pixelRatio || 1;
+        previewCanvas.width = Math.round(displayWidth * ratio);
+        previewCanvas.height = Math.round(displayHeight * ratio);
         previewCanvas.style.position = 'absolute';
         previewCanvas.style.inset = '0';
         previewCanvas.style.pointerEvents = 'none';
+        previewCanvas.style.width = `${displayWidth}px`;
+        previewCanvas.style.height = `${displayHeight}px`;
         page.overlay.appendChild(previewCanvas);
         page.previewLayer = previewCanvas;
+        page.previewContext = previewCanvas.getContext('2d');
+        if (ratio !== 1) {
+          page.previewContext.scale(ratio, ratio);
+        }
       }
-      const ctx = page.previewLayer.getContext('2d');
-      ctx.clearRect(0, 0, page.previewLayer.width, page.previewLayer.height);
+      const ctx = page.previewContext || page.previewLayer.getContext('2d');
+      const displayWidth = page.displayWidth || page.baseCanvas.width;
+      const displayHeight = page.displayHeight || page.baseCanvas.height;
+      ctx.clearRect(0, 0, displayWidth, displayHeight);
       const rectX = width < 0 ? x + width : x;
       const rectY = height < 0 ? y + height : y;
       const rectWidth = Math.abs(width);
@@ -1001,6 +1079,7 @@
       if (page.previewLayer) {
         page.previewLayer.remove();
         delete page.previewLayer;
+        delete page.previewContext;
       }
     }
 
@@ -1215,6 +1294,9 @@
     function createComment(page, x, y) {
       const text = prompt('Comment');
       if (!text) return;
+      if (state.commentsCollapsed) {
+        setCommentsCollapsed(false);
+      }
       const id = createId('comment');
       const marker = document.createElement('div');
       marker.className = 'comment-marker';
@@ -1237,6 +1319,9 @@
     }
 
     function focusComment(id) {
+      if (state.commentsCollapsed) {
+        setCommentsCollapsed(false);
+      }
       const entry = elements.commentList.querySelector(`[data-id="${id}"]`);
       if (entry) {
         elements.commentList.querySelectorAll('li.highlight').forEach(li => li.classList.remove('highlight'));
@@ -1390,6 +1475,10 @@
       button.addEventListener('click', () => setTool(button.dataset.tool));
     });
 
+    elements.toggleCommentsBtn?.addEventListener('click', () => {
+      setCommentsCollapsed(!state.commentsCollapsed);
+    });
+
     elements.openBtn.addEventListener('click', () => {
       elements.fileInput.value = '';
       elements.fileInput.click();
@@ -1467,12 +1556,13 @@
 
     elements.addPageBtn.addEventListener('click', () => {
       const basePage = state.pages[state.activePageIndex];
-      const width = basePage ? basePage.baseCanvas.width : 612;
-      const height = basePage ? basePage.baseCanvas.height : 792;
-      const { wrapper, baseCanvas, overlay, drawingLayer, annotationLayer } = createPageContainer(width, height);
+      const width = basePage ? basePage.displayWidth : 612;
+      const height = basePage ? basePage.displayHeight : 792;
+      const ratio = basePage ? basePage.pixelRatio : getCanvasPixelRatio();
+      const { wrapper, baseCanvas, overlay, drawingLayer, drawingContext, annotationLayer, pixelRatio } = createPageContainer(width, height, ratio);
       const ctx = baseCanvas.getContext('2d');
       ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, 0, width, height);
+      ctx.fillRect(0, 0, baseCanvas.width, baseCanvas.height);
       const annotations = {
         drawings: [],
         texts: [],
@@ -1486,20 +1576,25 @@
         baseCanvas,
         overlay,
         drawingLayer,
-        drawingContext: drawingLayer.getContext('2d'),
+        drawingContext,
         annotationLayer,
         annotations,
+        pixelRatio,
+        displayWidth: width,
+        displayHeight: height,
       };
       addPage(page, state.activePageIndex + 1);
     });
 
     elements.duplicatePageBtn.addEventListener('click', () => {
       const sourcePage = state.pages[state.activePageIndex];
-      const { wrapper, baseCanvas, overlay, drawingLayer, annotationLayer } = createPageContainer(sourcePage.baseCanvas.width, sourcePage.baseCanvas.height);
+      const { wrapper, baseCanvas, overlay, drawingLayer, drawingContext, annotationLayer, pixelRatio } = createPageContainer(sourcePage.displayWidth, sourcePage.displayHeight, sourcePage.pixelRatio);
       const ctx = baseCanvas.getContext('2d');
       ctx.drawImage(sourcePage.baseCanvas, 0, 0);
-      const drawingCtx = drawingLayer.getContext('2d');
-      drawingCtx.drawImage(sourcePage.drawingLayer, 0, 0);
+      drawingContext.save();
+      drawingContext.setTransform(1, 0, 0, 1, 0, 0);
+      drawingContext.drawImage(sourcePage.drawingLayer, 0, 0);
+      drawingContext.restore();
       const annotations = {
         drawings: JSON.parse(JSON.stringify(sourcePage.annotations.drawings)),
         texts: JSON.parse(JSON.stringify(sourcePage.annotations.texts)),
@@ -1519,9 +1614,12 @@
         baseCanvas,
         overlay,
         drawingLayer,
-        drawingContext: drawingCtx,
+        drawingContext,
         annotationLayer,
         annotations,
+        pixelRatio,
+        displayWidth: sourcePage.displayWidth,
+        displayHeight: sourcePage.displayHeight,
       };
       restoreAnnotations(page);
       addPage(page, state.activePageIndex + 1);
@@ -1624,12 +1722,14 @@
           const composed = await composePageCanvas(page);
           const pngBytes = await fetch(composed.toDataURL('image/png')).then(res => res.arrayBuffer());
           const pngImage = await pdfDoc.embedPng(pngBytes);
-          const pdfPage = pdfDoc.addPage([page.baseCanvas.width, page.baseCanvas.height]);
+          const pdfWidth = page.displayWidth || page.baseCanvas.width;
+          const pdfHeight = page.displayHeight || page.baseCanvas.height;
+          const pdfPage = pdfDoc.addPage([pdfWidth, pdfHeight]);
           pdfPage.drawImage(pngImage, {
             x: 0,
             y: 0,
-            width: page.baseCanvas.width,
-            height: page.baseCanvas.height,
+            width: pdfWidth,
+            height: pdfHeight,
           });
         }
         const pdfBytes = await pdfDoc.save();
@@ -1648,11 +1748,19 @@
 
     async function composePageCanvas(page) {
       const canvas = document.createElement('canvas');
-      canvas.width = page.baseCanvas.width;
-      canvas.height = page.baseCanvas.height;
+      const displayWidth = page.displayWidth || page.baseCanvas.width;
+      const displayHeight = page.displayHeight || page.baseCanvas.height;
+      const ratio = page.pixelRatio || 1;
+      canvas.width = Math.round(displayWidth * ratio);
+      canvas.height = Math.round(displayHeight * ratio);
       const ctx = canvas.getContext('2d');
       ctx.drawImage(page.baseCanvas, 0, 0);
       ctx.drawImage(page.drawingLayer, 0, 0);
+
+      ctx.save();
+      if (ratio !== 1) {
+        ctx.scale(ratio, ratio);
+      }
 
       page.annotations.redactions.forEach(redaction => {
         ctx.fillStyle = '#ffffff';
@@ -1703,6 +1811,8 @@
         ctx.fillText(String(comment.label), comment.x, comment.y);
         ctx.restore();
       }
+
+      ctx.restore();
 
       return canvas;
     }
