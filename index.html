@@ -508,6 +508,7 @@
       fontSize: 18,
       activePageIndex: 0,
       dragInfo: null,
+      draggedPageIndex: null,
       pendingImagePosition: null,
       commentCounter: 1,
       commentsCollapsed: false,
@@ -548,6 +549,15 @@
 
     setCommentsCollapsed(state.commentsCollapsed);
 
+    function getDraggingPageIndex(event) {
+      if (typeof state.draggedPageIndex === 'number') {
+        return state.draggedPageIndex;
+      }
+      const rawData = event.dataTransfer?.getData('text/plain') || '';
+      const parsedIndex = parseInt(rawData, 10);
+      return Number.isNaN(parsedIndex) ? null : parsedIndex;
+    }
+
     elements.thumbnails.addEventListener('dragover', (event) => {
       event.preventDefault();
       if (event.dataTransfer) {
@@ -560,9 +570,10 @@
         return;
       }
       event.preventDefault();
-      const draggingIndex = parseInt(event.dataTransfer?.getData('text/plain') || '', 10);
-      if (Number.isNaN(draggingIndex)) return;
+      const draggingIndex = getDraggingPageIndex(event);
+      if (draggingIndex == null) return;
       movePage(draggingIndex, state.pages.length);
+      state.draggedPageIndex = null;
     });
 
     function showToast(message) {
@@ -750,14 +761,17 @@
       });
 
       thumbnail.addEventListener('dragstart', (event) => {
-        event.dataTransfer.effectAllowed = 'move';
-        const currentIndex = Array.from(elements.thumbnails.children).indexOf(thumbnail);
-        event.dataTransfer.setData('text/plain', currentIndex.toString());
+        state.draggedPageIndex = Array.from(elements.thumbnails.children).indexOf(thumbnail);
+        if (event.dataTransfer) {
+          event.dataTransfer.effectAllowed = 'move';
+          event.dataTransfer.setData('text/plain', state.draggedPageIndex.toString());
+        }
         thumbnail.classList.add('dragging');
       });
 
       thumbnail.addEventListener('dragend', () => {
         thumbnail.classList.remove('dragging');
+        state.draggedPageIndex = null;
         Array.from(elements.thumbnails.querySelectorAll('.thumbnail')).forEach(el => {
           const indicator = el.querySelector('.thumbnail-drop-indicator');
           if (indicator) indicator.style.display = 'none';
@@ -769,8 +783,8 @@
         if (event.dataTransfer) {
           event.dataTransfer.dropEffect = 'move';
         }
-        const draggingIndex = parseInt(event.dataTransfer.getData('text/plain'), 10);
-        if (Number.isNaN(draggingIndex)) return;
+        const draggingIndex = getDraggingPageIndex(event);
+        if (draggingIndex == null) return;
         const currentIndex = Array.from(elements.thumbnails.children).indexOf(thumbnail);
         if (draggingIndex === currentIndex) return;
         const rect = thumbnail.getBoundingClientRect();
@@ -796,12 +810,13 @@
       thumbnail.addEventListener('drop', (event) => {
         event.preventDefault();
         event.stopPropagation();
-        const draggingIndex = parseInt(event.dataTransfer.getData('text/plain'), 10);
-        if (Number.isNaN(draggingIndex)) return;
+        const draggingIndex = getDraggingPageIndex(event);
+        if (draggingIndex == null) return;
         const targetIndex = Array.from(elements.thumbnails.children).indexOf(thumbnail);
         const position = thumbnail.dataset.dropPosition || 'after';
         const insertionIndex = position === 'before' ? targetIndex : targetIndex + 1;
         movePage(draggingIndex, insertionIndex);
+        state.draggedPageIndex = null;
         delete thumbnail.dataset.dropPosition;
         const indicator = thumbnail.querySelector('.thumbnail-drop-indicator');
         if (indicator) indicator.style.display = 'none';
