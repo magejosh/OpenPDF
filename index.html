@@ -113,14 +113,25 @@
       position: relative;
       cursor: grab;
       background: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: border-color 0.15s, box-shadow 0.15s;
     }
 
     .thumbnail.active {
       border-color: var(--accent);
     }
 
+    .thumbnail.dragging {
+      opacity: 0.7;
+      cursor: grabbing;
+      box-shadow: 0 8px 20px rgba(17, 24, 39, 0.18);
+    }
+
     .thumbnail canvas {
       width: 100%;
+      height: auto;
       display: block;
     }
 
@@ -493,10 +504,30 @@
       emptyState: document.getElementById('empty-state'),
     };
 
+    const THUMBNAIL_MAX_WIDTH = 220;
+    const THUMBNAIL_MAX_HEIGHT = 320;
+
     const createId = (() => {
       let counter = 0;
       return (prefix) => `${prefix}-${++counter}`;
     })();
+
+    elements.thumbnails.addEventListener('dragover', (event) => {
+      event.preventDefault();
+      if (event.dataTransfer) {
+        event.dataTransfer.dropEffect = 'move';
+      }
+    });
+
+    elements.thumbnails.addEventListener('drop', (event) => {
+      if (event.target !== elements.thumbnails) {
+        return;
+      }
+      event.preventDefault();
+      const draggingIndex = parseInt(event.dataTransfer?.getData('text/plain') || '', 10);
+      if (Number.isNaN(draggingIndex)) return;
+      movePage(draggingIndex, state.pages.length);
+    });
 
     function showToast(message) {
       elements.toast.textContent = message;
@@ -646,8 +677,16 @@
       thumbnail.appendChild(indicator);
 
       const thumbCanvas = document.createElement('canvas');
-      thumbCanvas.width = 160;
-      thumbCanvas.height = 200;
+      const pageWidth = page.baseCanvas.width;
+      const pageHeight = page.baseCanvas.height;
+      const widthScale = THUMBNAIL_MAX_WIDTH / pageWidth;
+      const heightScale = THUMBNAIL_MAX_HEIGHT / pageHeight;
+      const scale = Math.min(widthScale, heightScale, 1);
+      const thumbWidth = Math.max(1, Math.round(pageWidth * scale));
+      const thumbHeight = Math.max(1, Math.round(pageHeight * scale));
+      thumbnail.style.aspectRatio = `${pageWidth} / ${pageHeight}`;
+      thumbCanvas.width = thumbWidth;
+      thumbCanvas.height = thumbHeight;
       thumbnail.appendChild(thumbCanvas);
 
       thumbnail.addEventListener('click', () => {
@@ -656,7 +695,8 @@
 
       thumbnail.addEventListener('dragstart', (event) => {
         event.dataTransfer.effectAllowed = 'move';
-        event.dataTransfer.setData('text/plain', pageIndex.toString());
+        const currentIndex = Array.from(elements.thumbnails.children).indexOf(thumbnail);
+        event.dataTransfer.setData('text/plain', currentIndex.toString());
         thumbnail.classList.add('dragging');
       });
 
@@ -670,6 +710,9 @@
 
       thumbnail.addEventListener('dragover', (event) => {
         event.preventDefault();
+        if (event.dataTransfer) {
+          event.dataTransfer.dropEffect = 'move';
+        }
         const draggingIndex = parseInt(event.dataTransfer.getData('text/plain'), 10);
         if (Number.isNaN(draggingIndex)) return;
         const currentIndex = Array.from(elements.thumbnails.children).indexOf(thumbnail);
@@ -696,6 +739,7 @@
 
       thumbnail.addEventListener('drop', (event) => {
         event.preventDefault();
+        event.stopPropagation();
         const draggingIndex = parseInt(event.dataTransfer.getData('text/plain'), 10);
         if (Number.isNaN(draggingIndex)) return;
         const targetIndex = Array.from(elements.thumbnails.children).indexOf(thumbnail);
@@ -800,17 +844,19 @@
     }
 
     function movePage(fromIndex, toIndex) {
-      if (fromIndex === toIndex || fromIndex + 1 === toIndex) return;
+      if (fromIndex === toIndex || fromIndex < 0 || fromIndex >= state.pages.length) return;
+      let targetIndex = toIndex;
+      if (targetIndex < 0) targetIndex = 0;
+      if (targetIndex > state.pages.length) targetIndex = state.pages.length;
       const [page] = state.pages.splice(fromIndex, 1);
-      let insertionIndex = toIndex;
-      if (insertionIndex < 0) insertionIndex = 0;
-      if (insertionIndex > state.pages.length) insertionIndex = state.pages.length;
-      if (fromIndex < toIndex) {
-        insertionIndex = Math.max(0, toIndex - 1);
+      if (fromIndex < targetIndex) {
+        targetIndex -= 1;
       }
-      state.pages.splice(insertionIndex, 0, page);
+      if (targetIndex < 0) targetIndex = 0;
+      if (targetIndex > state.pages.length) targetIndex = state.pages.length;
+      state.pages.splice(targetIndex, 0, page);
       renderPageList();
-      setActivePage(insertionIndex);
+      setActivePage(targetIndex);
     }
 
     async function loadPdfFromArrayBuffer(arrayBuffer, fileLabel = 'PDF document') {
