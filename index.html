@@ -536,6 +536,9 @@
 
     const THUMBNAIL_MAX_WIDTH = 260;
     const THUMBNAIL_MAX_HEIGHT = 420;
+    const DEFAULT_IMAGE_WIDTH = 240;
+    const DEFAULT_IMAGE_HEIGHT = 160;
+    const MIN_IMAGE_SIZE = 64;
 
     function getCanvasPixelRatio() {
       const ratio = window.devicePixelRatio || 1;
@@ -548,6 +551,53 @@
     })();
 
     setCommentsCollapsed(state.commentsCollapsed);
+
+    function clamp(value, min, max) {
+      return Math.min(Math.max(value, min), max);
+    }
+
+    function getActivePage() {
+      return state.pages[state.activePageIndex];
+    }
+
+    function getPageDisplaySize(page) {
+      if (!page) {
+        return { width: 0, height: 0 };
+      }
+      const width = page.displayWidth
+        || (page.baseCanvas?.style?.width ? parseFloat(page.baseCanvas.style.width) : 0)
+        || page.baseCanvas?.width
+        || 0;
+      const height = page.displayHeight
+        || (page.baseCanvas?.style?.height ? parseFloat(page.baseCanvas.style.height) : 0)
+        || page.baseCanvas?.height
+        || 0;
+      return { width, height };
+    }
+
+    function requestImageSelection(position) {
+      state.pendingImagePosition = null;
+      const page = getActivePage();
+      if (!page) {
+        showToast('Open a PDF before adding images');
+        setTool('select', { silent: true, triggerImagePicker: false });
+        return false;
+      }
+      const { width: pageWidth, height: pageHeight } = getPageDisplaySize(page);
+      const safeWidth = pageWidth || DEFAULT_IMAGE_WIDTH * 2;
+      const safeHeight = pageHeight || DEFAULT_IMAGE_HEIGHT * 2;
+      const defaultX = Math.max(0, (safeWidth - DEFAULT_IMAGE_WIDTH) / 2);
+      const defaultY = Math.max(0, (safeHeight - DEFAULT_IMAGE_HEIGHT) / 2);
+      const pendingPosition = {
+        x: typeof position?.x === 'number' ? position.x : defaultX,
+        y: typeof position?.y === 'number' ? position.y : defaultY,
+        centered: position?.centered ?? true,
+      };
+      state.pendingImagePosition = pendingPosition;
+      elements.imageInput.value = '';
+      elements.imageInput.click();
+      return true;
+    }
 
     function getDraggingPageIndex(event) {
       if (typeof state.draggedPageIndex === 'number') {
@@ -644,11 +694,20 @@
       elements.emptyState.style.display = '';
     }
 
-    function setTool(tool) {
+    function setTool(tool, options = {}) {
       state.tool = tool;
       elements.toolButtons.forEach(btn => btn.classList.toggle('active', btn.dataset.tool === tool));
       updateOverlayInteractivity();
-      showToast(`${tool.charAt(0).toUpperCase() + tool.slice(1)} tool selected`);
+      let shouldAnnounce = !options.silent;
+      if (tool === 'image' && options.triggerImagePicker !== false) {
+        const opened = requestImageSelection(options.imagePosition);
+        if (!opened) {
+          shouldAnnounce = false;
+        }
+      }
+      if (shouldAnnounce) {
+        showToast(`${tool.charAt(0).toUpperCase() + tool.slice(1)} tool selected`);
+      }
     }
 
     function updateOverlayInteractivity() {
@@ -1135,9 +1194,7 @@
       } else if (state.tool === 'comment') {
         createComment(page, x, y);
       } else if (state.tool === 'image') {
-        state.pendingImagePosition = { x, y };
-        elements.imageInput.value = '';
-        elements.imageInput.click();
+        requestImageSelection({ x, y, centered: false });
       }
     }
 
@@ -1508,65 +1565,164 @@
     });
 
     elements.imageInput.addEventListener('change', (event) => {
-      const file = event.target.files[0];
-      if (!file || !state.pendingImagePosition) return;
+      const input = event.target;
+      const files = input?.files;
+      const file = files && files[0];
+      if (!file) {
+        state.pendingImagePosition = null;
+        if (input) {
+          input.value = '';
+        }
+        return;
+      }
+
+      const position = state.pendingImagePosition;
+      if (!position) {
+        showToast('Click on the page to choose where the image should go.');
+        state.pendingImagePosition = null;
+        if (input) {
+          input.value = '';
+        }
+        return;
+      }
+
       const reader = new FileReader();
       reader.onload = (e) => {
-        insertImage(state.pendingImagePosition.x, state.pendingImagePosition.y, e.target.result);
+        const dataUrl = typeof e.target?.result === 'string' ? e.target.result : null;
+        if (dataUrl) {
+          insertImage(position, dataUrl);
+        } else {
+          showToast('Unable to read the selected image. Please try again.');
+        }
         state.pendingImagePosition = null;
+        if (input) {
+          input.value = '';
+        }
+      };
+      reader.onerror = () => {
+        showToast('Unable to read the selected image. Please try again.');
+        state.pendingImagePosition = null;
+        if (input) {
+          input.value = '';
+        }
       };
       reader.readAsDataURL(file);
     });
 
-    function insertImage(x, y, dataUrl) {
-      const page = state.pages[state.activePageIndex];
+    function insertImage(position, dataUrl) {
+      const page = getActivePage();
       if (!page) {
         showToast('Open a PDF before adding images');
         return;
       }
+
+      state.pendingImagePosition = null;
+
+      const { width: pageWidth, height: pageHeight } = getPageDisplaySize(page);
+      const safePageWidth = pageWidth || DEFAULT_IMAGE_WIDTH * 2;
+      const safePageHeight = pageHeight || DEFAULT_IMAGE_HEIGHT * 2;
+      const anchorX = typeof position?.x === 'number' ? position.x : Math.max(0, (safePageWidth - DEFAULT_IMAGE_WIDTH) / 2);
+      const anchorY = typeof position?.y === 'number' ? position.y : Math.max(0, (safePageHeight - DEFAULT_IMAGE_HEIGHT) / 2);
+      const shouldCenter = position?.centered ?? true;
+      const fallbackRatio = DEFAULT_IMAGE_WIDTH / DEFAULT_IMAGE_HEIGHT;
+      const minWidthAllowed = Math.min(MIN_IMAGE_SIZE, safePageWidth);
+      const minHeightAllowed = Math.min(MIN_IMAGE_SIZE, safePageHeight);
+
       const id = createId('image');
       const imgWrapper = document.createElement('div');
       imgWrapper.className = 'image-box';
-      imgWrapper.style.left = `${x}px`;
-      imgWrapper.style.top = `${y}px`;
       imgWrapper.dataset.id = id;
-      imgWrapper.style.width = '240px';
-      imgWrapper.style.height = '160px';
 
       const img = document.createElement('img');
-      img.src = dataUrl;
+      img.alt = 'Inserted image';
       img.style.display = 'block';
-      img.style.width = '240px';
-      img.style.height = 'auto';
-      imgWrapper.appendChild(img);
 
       const handle = document.createElement('div');
       handle.className = 'resize-handle';
-      imgWrapper.appendChild(handle);
 
+      imgWrapper.appendChild(img);
+      imgWrapper.appendChild(handle);
       page.annotationLayer.appendChild(imgWrapper);
 
       const annotation = {
         id,
-        x,
-        y,
-        width: 240,
-        height: 160,
+        x: anchorX,
+        y: anchorY,
+        width: DEFAULT_IMAGE_WIDTH,
+        height: DEFAULT_IMAGE_HEIGHT,
         dataUrl,
       };
       page.annotations.images.push(annotation);
 
+      function applyLayout(width, height) {
+        const maxX = Math.max(0, safePageWidth - width);
+        const maxY = Math.max(0, safePageHeight - height);
+        let targetX = shouldCenter ? (safePageWidth - width) / 2 : anchorX;
+        let targetY = shouldCenter ? (safePageHeight - height) / 2 : anchorY;
+        targetX = clamp(targetX, 0, maxX);
+        targetY = clamp(targetY, 0, maxY);
+        annotation.x = targetX;
+        annotation.y = targetY;
+        annotation.width = width;
+        annotation.height = height;
+        imgWrapper.style.left = `${targetX}px`;
+        imgWrapper.style.top = `${targetY}px`;
+        imgWrapper.style.width = `${width}px`;
+        imgWrapper.style.height = `${height}px`;
+        img.style.width = `${width}px`;
+        img.style.height = `${height}px`;
+      }
+
+      let initialWidth = Math.min(DEFAULT_IMAGE_WIDTH, safePageWidth);
+      initialWidth = Math.max(minWidthAllowed, initialWidth);
+      let initialHeight = initialWidth / fallbackRatio;
+      if (initialHeight > safePageHeight) {
+        initialHeight = Math.max(minHeightAllowed, safePageHeight);
+        initialWidth = initialHeight * fallbackRatio;
+        initialWidth = Math.min(safePageWidth, Math.max(minWidthAllowed, initialWidth));
+      }
+      initialWidth = Math.min(safePageWidth, Math.max(minWidthAllowed, initialWidth));
+      initialHeight = Math.min(safePageHeight, Math.max(minHeightAllowed, initialHeight));
+      applyLayout(initialWidth, initialHeight);
+
       img.onload = () => {
-        const ratio = img.naturalWidth / img.naturalHeight;
-        annotation.height = annotation.width / ratio;
-        imgWrapper.style.width = `${annotation.width}px`;
-        imgWrapper.style.height = `${annotation.height}px`;
-        img.style.width = `${annotation.width}px`;
-        img.style.height = `${annotation.height}px`;
+        const naturalRatio = img.naturalWidth > 0 && img.naturalHeight > 0
+          ? img.naturalWidth / img.naturalHeight
+          : fallbackRatio;
+        const safeRatio = Number.isFinite(naturalRatio) && naturalRatio > 0 ? naturalRatio : fallbackRatio;
+        const maxWidth = safePageWidth;
+        const maxHeight = safePageHeight;
+        let width = Math.min(DEFAULT_IMAGE_WIDTH, maxWidth);
+        width = Math.min(maxWidth, Math.max(minWidthAllowed, width));
+        let height = width / safeRatio;
+        if (height > maxHeight) {
+          height = Math.max(minHeightAllowed, maxHeight);
+          width = height * safeRatio;
+          width = Math.min(maxWidth, Math.max(minWidthAllowed, width));
+        }
+        width = Math.min(maxWidth, Math.max(minWidthAllowed, width));
+        height = Math.min(maxHeight, Math.max(minHeightAllowed, height));
+        applyLayout(width, height);
+        Array.from(page.annotationLayer.querySelectorAll('.image-box')).forEach(box => {
+          box.classList.toggle('active', box === imgWrapper);
+        });
         enableDrag(imgWrapper, annotation, page);
         enableResize(imgWrapper, handle, annotation, page);
         refreshThumbnails();
+        setTool('select', { silent: true, triggerImagePicker: false });
+        showToast('Image added. Use Select to move or resize it.');
       };
+
+      img.onerror = () => {
+        const index = page.annotations.images.indexOf(annotation);
+        if (index !== -1) {
+          page.annotations.images.splice(index, 1);
+        }
+        imgWrapper.remove();
+        showToast('Failed to load image. Please try another file.');
+      };
+
+      img.src = dataUrl;
     }
 
     elements.addPageBtn.addEventListener('click', () => {
