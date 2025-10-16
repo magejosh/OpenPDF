@@ -399,6 +399,9 @@
       }
     }
   </style>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.10.111/pdf.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.10.111/pdf.worker.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.10.111/pdf.min.js" integrity="sha512-V8PmCDbuhKTlFUS1N5JRHk9tbtzlAUvww73RZ74vspX1xRtzgS4kCmFc1ZAgdtLBzozcbx5VY0h7wM6LupYsaQ==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.10.111/pdf.worker.min.js" integrity="sha512-xfo/gL88Hux4JsW24pl9nxIY0viQvRnZXo6lXQnNzCqhjN14w7XEG0VreHwmF/x9Zm3XgXyIN2B7yWIgOYhINg==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js" integrity="sha512-6o63gOXImOA1IZ29M8O6XAvAdjhAO1H4gmhFvRHUnIA8GaxOi1tEdJLhUWxEGYyyOUBvt93Opa6ZUiPYDKmgTg==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
@@ -448,6 +451,11 @@
   <input type="file" id="image-input" class="hidden-input" accept="image/*" />
   <div class="toast" id="toast"></div>
   <script>
+    const PDF_JS_WORKER_SRC = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.10.111/pdf.worker.min.js';
+    let pdfjsLib = window['pdfjs-dist/build/pdf'] || window.pdfjsLib || null;
+    if (pdfjsLib && pdfjsLib.GlobalWorkerOptions) {
+      pdfjsLib.GlobalWorkerOptions.workerSrc = PDF_JS_WORKER_SRC;
+    }
     const pdfjsLib = window['pdfjs-dist/build/pdf'];
     pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.10.111/pdf.worker.min.js';
 
@@ -491,6 +499,43 @@
       elements.toast.textContent = message;
       elements.toast.classList.add('show');
       setTimeout(() => elements.toast.classList.remove('show'), 2200);
+    }
+
+    function loadScript(src) {
+      return new Promise((resolve, reject) => {
+        const script = document.createElement('script');
+        script.src = src;
+        script.async = false;
+        script.onload = () => resolve();
+        script.onerror = () => reject(new Error(`Failed to load script: ${src}`));
+        document.head.appendChild(script);
+      });
+    }
+
+    let pdfjsLibLoading = null;
+
+    async function ensurePdfJsLoaded() {
+      if (pdfjsLib) {
+        return pdfjsLib;
+      }
+      if (!pdfjsLibLoading) {
+        pdfjsLibLoading = loadScript('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.10.111/pdf.min.js')
+          .then(() => {
+            pdfjsLib = window['pdfjs-dist/build/pdf'] || window.pdfjsLib || null;
+            if (pdfjsLib && pdfjsLib.GlobalWorkerOptions) {
+              pdfjsLib.GlobalWorkerOptions.workerSrc = PDF_JS_WORKER_SRC;
+            }
+            if (!pdfjsLib) {
+              throw new Error('PDF.js global not available after dynamic load');
+            }
+            return pdfjsLib;
+          })
+          .catch((error) => {
+            pdfjsLibLoading = null;
+            throw error;
+          });
+      }
+      return pdfjsLibLoading;
     }
 
     function clearDocument() {
@@ -765,6 +810,66 @@
       setActivePage(insertionIndex);
     }
 
+    async function loadPdfFromArrayBuffer(arrayBuffer, fileLabel = 'PDF document') {
+      let lib;
+      try {
+        lib = await ensurePdfJsLoaded();
+      } catch (error) {
+        console.error(error);
+        showToast('PDF engine failed to load. Please refresh and try again.');
+        return;
+      }
+
+      let pdf;
+      try {
+        pdf = await lib.getDocument({ data: arrayBuffer }).promise;
+      } catch (error) {
+        console.error(error);
+        showToast('Failed to load PDF. Please try another file.');
+        return;
+      }
+
+      clearDocument();
+
+      for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber++) {
+        const pdfPage = await pdf.getPage(pageNumber);
+        const viewport = pdfPage.getViewport({ scale: 1.5 });
+        const { wrapper, baseCanvas, overlay, drawingLayer, annotationLayer } = createPageContainer(viewport.width, viewport.height);
+        const context = baseCanvas.getContext('2d');
+        await pdfPage.render({ canvasContext: context, viewport }).promise;
+
+        const annotations = {
+          drawings: [],
+          texts: [],
+          notes: [],
+          images: [],
+          redactions: [],
+          comments: [],
+        };
+
+        const page = {
+          container: wrapper,
+          baseCanvas,
+          overlay,
+          drawingLayer,
+          drawingContext: drawingLayer.getContext('2d'),
+          annotationLayer,
+          annotations,
+        };
+
+        elements.pageContainer.appendChild(wrapper);
+        state.pages.push(page);
+        setupPageEvents(page, state.pages.length - 1);
+      }
+
+      renderPageList();
+      setActivePage(0);
+      elements.downloadBtn.disabled = state.pages.length === 0;
+      elements.addPageBtn.disabled = false;
+      elements.duplicatePageBtn.disabled = state.pages.length === 0;
+      const pageCount = state.pages.length;
+      const label = fileLabel || 'PDF document';
+      showToast(`${label} loaded (${pageCount} page${pageCount === 1 ? '' : 's'})`);
     function loadPdfFromArrayBuffer(arrayBuffer) {
       clearDocument();
       pdfjsLib.getDocument({ data: arrayBuffer }).promise.then(async (pdf) => {
@@ -1213,6 +1318,28 @@
       });
     }
 
+    function isPdfFile(file) {
+      if (!file) return false;
+      if (file.type === 'application/pdf') return true;
+      const name = file.name || '';
+      return name.toLowerCase().endsWith('.pdf');
+    }
+
+    async function openPdfFile(file) {
+      if (!file) return;
+      if (!isPdfFile(file)) {
+        showToast('Please choose a PDF file');
+        return;
+      }
+      try {
+        const arrayBuffer = await file.arrayBuffer();
+        await loadPdfFromArrayBuffer(arrayBuffer, file.name || 'PDF document');
+      } catch (error) {
+        console.error(error);
+        showToast('Unable to read the selected file');
+      }
+    }
+
     elements.colorPicker.addEventListener('change', (event) => {
       state.color = event.target.value;
       const active = document.activeElement;
@@ -1258,6 +1385,12 @@
       elements.fileInput.click();
     });
 
+    elements.fileInput.addEventListener('change', async (event) => {
+      const files = event.target.files;
+      const file = files && files[0];
+      if (!file) return;
+      await openPdfFile(file);
+      event.target.value = '';
     elements.fileInput.addEventListener('change', (event) => {
       const file = event.target.files[0];
       if (!file) return;
@@ -1588,6 +1721,14 @@
       event.dataTransfer.dropEffect = 'copy';
     });
 
+    document.addEventListener('drop', async (event) => {
+      event.preventDefault();
+      const transfer = event.dataTransfer;
+      if (!transfer || !transfer.files || transfer.files.length === 0) {
+        return;
+      }
+      const file = transfer.files[0];
+      await openPdfFile(file);
     document.addEventListener('drop', (event) => {
       event.preventDefault();
       const file = event.dataTransfer.files[0];
